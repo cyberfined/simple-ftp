@@ -6,7 +6,7 @@ module FTP.Server
 
 import Control.Concurrent         (forkIO)
 import Control.Concurrent.MVar    ( MVar, newMVar, newEmptyMVar, modifyMVar, putMVar
-                                  , tryTakeMVar, readMVar, takeMVar
+                                  , tryTakeMVar, readMVar, takeMVar, modifyMVar_
                                   )
 import Control.Monad              (void, forM_)
 import Control.Monad.IO.Class     (MonadIO(..))
@@ -62,6 +62,7 @@ runServer settings@Settings{..} = do
     usedPortsMVar <- newMVar IntSet.empty
     timeCache <- newTimeCache simpleTimeFormat'
     (logger, _) <- newTimedFastLogger timeCache (LogStderr 1024)
+    currentPortRef <- newIORef 0
     serve HostIPv4 (show settingsPort) $ \(sock, _) -> do
         ipAddr <- getSocketName sock >>= \case
             SockAddrInet _ host -> pure $ hostAddressToTuple host
@@ -85,6 +86,7 @@ runServer settings@Settings{..} = do
                 , clientUsedPorts   = usedPortsMVar
                 , clientIsModeSet   = isModeSetRef
                 , clientLogger      = logger
+                , clientCurrentPort = currentPortRef
                 }
         runReaderT (runServerM handleConn) ctx
 
@@ -104,6 +106,7 @@ data ClientContext = ClientContext
     , clientUsedPorts   :: !(MVar IntSet)
     , clientIsModeSet   :: !(IORef Bool)
     , clientLogger      :: !TimedFastLogger
+    , clientCurrentPort :: !(IORef Int)
     }
 
 handleConn :: ServerM ()
@@ -178,6 +181,8 @@ handleCmd Cwd dir = authCmd $ do
 handleCmd Pasv _ = authCmd $ getFreePort >>= \case
     Nothing   -> sendResponse 425 "All ports are used."
     Just port -> do
+        currentPortRef <- asks clientCurrentPort
+        liftIO $ writeIORef currentPortRef (fromIntegral port)
         fileConnMVar <- asks clientFileConn
         liftIO $ tryTakeMVar fileConnMVar >>= \case
             Nothing       -> pure ()
@@ -309,6 +314,10 @@ getFile file = do
 
 closeFileConn :: ServerM ()
 closeFileConn = do
+    currentPortRef <- asks clientCurrentPort
+    currentPort <- liftIO $ readIORef currentPortRef
+    usedPortsMVar <- asks clientUsedPorts
+    liftIO $ modifyMVar_ usedPortsMVar (pure . IntSet.delete currentPort)
     fileConnMVar <- asks clientFileConn
     fileConn <- liftIO $ takeMVar fileConnMVar 
     closeSock fileConn
