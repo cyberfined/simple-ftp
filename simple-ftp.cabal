@@ -1,8 +1,8 @@
 cabal-version: 2.2
 name:          simple-ftp
 version:       0.1.0.0
---synopsis:
---description:
+synopsis:      Simple ftp server
+description:   Simple ftp server
 homepage:      https://ci.cyberfined.xyz/cyberfined/simple-ftp
 author:        cyberfined
 maintainer:    cyberfined@protonmail.com
