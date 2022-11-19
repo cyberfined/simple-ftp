@@ -54,7 +54,9 @@ import System.Posix.Types         (FileMode)
 
 import FTP.Commands
 
+import qualified Codec.Binary.UTF8.String as UTF8
 import qualified Data.ByteString.Char8 as BS
+import qualified Data.ByteString as BSWord
 import qualified Data.IntSet as IntSet
 
 data Settings = Settings
@@ -144,7 +146,8 @@ handleConn = do
                       Right (cmd, arg) -> case cmd of
                           Quit -> pure ()
                           _    -> do
-                              catch (handleCmd cmd arg) $ \(_ :: SomeException) ->
+                              catch (handleCmd cmd arg) $ \(e :: SomeException) -> do
+                                  writeLog (toLogStr $ show e)
                                   sendResponse 550 "Something went wrong."
                               loop
 
@@ -187,7 +190,7 @@ handleCmd Pwd _ = authCmd $ do
     sendResponse 257 $ "\"" <> relativeDir <> "\" is current directory."
 handleCmd Rmd dir = authCmd $ do
     (rmDir, _) <- concatFilePathM dir
-    let strRmDir = BS.unpack rmDir
+    let strRmDir = toStringUtf8 rmDir
     liftIO (doesDirectoryExist strRmDir) >>= \case
         False -> sendResponse 550 "The system cannot find the file specified."
         True  -> do
@@ -200,7 +203,7 @@ handleCmd Rmd dir = authCmd $ do
                 Right{}    -> sendResponse 250 "Directory was deleted."
 handleCmd Mkd dir = authCmd $ do
     (mkDir, _) <- concatFilePathM dir
-    liftIO $ createDirectory (BS.unpack mkDir)
+    liftIO $ createDirectory (toStringUtf8 mkDir)
     sendResponse 250 "Directory was created"
 handleCmd Cwd dir = authCmd $ do
     curDirRef <- asks clientCurDir
@@ -209,7 +212,7 @@ handleCmd Cwd dir = authCmd $ do
     relativeDir <- liftIO $ readIORef relativeDirRef
     rootDir <- asks (settingsDirectory . clientSettings)
     let (newCurDir, newRelativeDir) = concatFilePath rootDir curDir relativeDir dir
-    doesExist <- liftIO $ doesDirectoryExist (BS.unpack newCurDir)
+    doesExist <- liftIO $ doesDirectoryExist (toStringUtf8 newCurDir)
     if doesExist
        then do
            liftIO $ writeIORef curDirRef newCurDir
@@ -247,17 +250,17 @@ handleCmd Size file = authCmd $ do
     curDirRef <- asks clientCurDir
     curDir <- liftIO $ readIORef curDirRef
     let absFilePath = curDir </> file
-    doesExist <- liftIO $ doesFileExist (BS.unpack absFilePath)
+    doesExist <- liftIO $ doesFileExist (toStringUtf8 absFilePath)
     if doesExist
        then do
-           fStat <- liftIO $ getFileStatus (BS.unpack absFilePath)
+           fStat <- liftIO $ getFileStatus (toStringUtf8 absFilePath)
            let size = fileSize fStat
            sendResponse 213 (BS.pack $ show size)
        else sendResponse 550 "The system cannot find the file specified."
 handleCmd List args = fileConnCmd $ do
     let dir = getListDirectory args
     (listDir, _) <- concatFilePathM dir
-    let strListDir = BS.unpack listDir
+    let strListDir = toStringUtf8 listDir
     doesExist <- liftIO $ doesDirectoryExist strListDir
     if not doesExist
        then sendResponse 550 "The system cannot find the file specified."
@@ -267,9 +270,9 @@ handleCmd List args = fileConnCmd $ do
            fileConnMVar <- asks clientFileConn
            fileConn <- liftIO $ readMVar fileConnMVar
            forM_ files $ \file -> liftIO $ do
-               let fileName = BS.pack file
+               let fileName = fromStringUtf8 file
                let filePath = listDir </> fileName
-               fStat <- getFileStatus (BS.unpack filePath)
+               fStat <- getFileStatus (toStringUtf8 filePath)
                let line = formatFileStat fileName fStat
                send fileConn (line <> "\n")
            closeFileConn
@@ -286,7 +289,7 @@ handleCmd Retr file = fileConnCmd $ getFile file >>= \case
 handleCmd Stor file = fileConnCmd $ do
     (newFile, _) <- concatFilePathM file
     let upDirectory = takeDirectory newFile
-    doesExist <- liftIO $ doesDirectoryExist (BS.unpack upDirectory)
+    doesExist <- liftIO $ doesDirectoryExist (toStringUtf8 upDirectory)
     if doesExist
        then do
            sendResponse 150 "Opening BINARY mode data connection."
@@ -296,7 +299,7 @@ handleCmd Stor file = fileConnCmd $ do
            sendResponse 550 "Directory does not exist."
 handleCmd Dele file = authCmd $ do
     (rmFile, _) <- concatFilePathM file
-    let strRmFile = BS.unpack rmFile
+    let strRmFile = toStringUtf8 rmFile
     doesExist <- liftIO $ doesFileExist strRmFile
     if doesExist
        then do
@@ -305,7 +308,7 @@ handleCmd Dele file = authCmd $ do
        else sendResponse 550 "The system cannot find the file specified."
 handleCmd Rnfr file = authCmd $ do
     (rnFile, _) <- concatFilePathM file
-    doesExist <- liftIO $ doesPathExist (BS.unpack rnFile)
+    doesExist <- liftIO $ doesPathExist (toStringUtf8 rnFile)
     if doesExist
        then do
            renameFromRef <- asks clientRenameFrom
@@ -317,7 +320,7 @@ handleCmd Rnto renameTo = authCmd $ do
     liftIO (readIORef renameFromRef) >>= \case
         Nothing         -> sendResponse 425 "Use RNFR first."
         Just renameFrom -> do
-            liftIO $ renamePath (BS.unpack renameFrom) (BS.unpack renameTo)
+            liftIO $ renamePath (toStringUtf8 renameFrom) (toStringUtf8 renameTo)
             liftIO $ writeIORef renameFromRef Nothing
             sendResponse 250 "File was renamed."
 handleCmd Quit _ = pure ()
@@ -379,7 +382,7 @@ retrieveFile :: ByteString -> ServerM ()
 retrieveFile path = do
     fileConnMVar <- asks clientFileConn
     fileConn <- liftIO $ readMVar fileConnMVar
-    liftIO $ withFile (BS.unpack path) WriteMode (loop fileConn)
+    liftIO $ withFile (toStringUtf8 path) WriteMode (loop fileConn)
   where loop fileConn handle = recv fileConn 4096 >>= \case
             Nothing    -> pure ()
             Just chunk -> BS.hPut handle chunk >> loop fileConn handle
@@ -388,7 +391,7 @@ retrieveFile path = do
 getFile :: ByteString -> ServerM (Maybe (Handle, Int))
 getFile file = do
     (filePathBs, _) <- concatFilePathM file
-    let filePath = BS.unpack filePathBs
+    let filePath = toStringUtf8 filePathBs
     doesExist <- liftIO $ doesFileExist filePath
     if doesExist
        then liftIO $ do
@@ -486,3 +489,9 @@ concatFilePath rootDir absDir relDir path
       in if restPath == ""
             then (newAbsDir, newRelDir)
             else concatFilePath rootDir newAbsDir newRelDir restPath
+
+toStringUtf8 :: ByteString -> String
+toStringUtf8 = UTF8.decode . BSWord.unpack
+
+fromStringUtf8 :: String -> ByteString
+fromStringUtf8 = BSWord.pack . UTF8.encode
