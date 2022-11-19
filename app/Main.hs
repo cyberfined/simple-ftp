@@ -1,8 +1,9 @@
 module Main (main) where
 
-import FTP.Server (Settings(..), runServer)
+import FTP.Server    (runServer)
+import OptionsParser (parseOptions)
 
 main :: IO ()
-main = runServer settings
-  where settings = Settings Nothing Nothing 3000 dir
-        dir = "/home/cyberfined/Documents/simple-ftp"
+main = do
+    settings <- parseOptions
+    runServer settings

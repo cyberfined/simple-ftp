@@ -4,6 +4,7 @@ module FTP.Commands
     ) where
 
 import Data.ByteString (ByteString)
+import Data.Char       (toUpper)
 
 import qualified Data.ByteString.Char8 as BS
 
@@ -31,7 +32,7 @@ data Command
 parseCmd :: ByteString -> Either ByteString (Command, ByteString)
 parseCmd str = (,) <$> cmd <*> pure (BS.strip arg)
   where (strCmd, arg) = BS.break (== ' ') str
-        cmd = case (BS.strip strCmd) of
+        cmd = case (BS.map toUpper $ BS.strip strCmd) of
             "USER" -> Right User
             "PASS" -> Right Pass
             "SYST" -> Right Syst
