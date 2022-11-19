@@ -5,65 +5,68 @@ module FTP.Server
     , runServer
     ) where
 
-import Control.Concurrent         (forkIO)
-import Control.Concurrent.MVar    ( MVar, newMVar, newEmptyMVar, modifyMVar, putMVar
-                                  , tryTakeMVar, readMVar, takeMVar, modifyMVar_
-                                  )
-import Control.Monad              (void, forM_)
-import Control.Monad.Catch        ( MonadCatch(..), MonadThrow(..), SomeException, catch
-                                  , tryJust
-                                  )
-import Control.Monad.IO.Class     (MonadIO(..))
-import Control.Monad.Reader       (ReaderT(..), MonadReader(..), asks)
-import Data.Bits                  ((.&.), shiftR)
-import Data.ByteString            (ByteString)
-import Data.Fixed                 (Fixed(..))
-import Data.IntSet                (IntSet)
-import Data.IORef                 (IORef, newIORef, writeIORef, readIORef)
-import Data.Time                  ( secondsToNominalDiffTime, formatTime
-                                  , defaultTimeLocale
-                                  )
-import Data.Time.Clock.POSIX      (posixSecondsToUTCTime)
-import Data.Word                  (Word8, Word16)
-import GHC.IO.Exception           (IOErrorType(..), IOException(..))
-import Network.Simple.TCP         ( HostPreference(..), Socket, serve, recv, send
-                                  , bindSock, listenSock, closeSock
-                                  )
-import Network.Socket             ( SockAddr(..), hostAddressToTuple, getSocketName
-                                  , accept
-                                  )
-import Prelude             hiding (read)
-import System.Directory           ( doesDirectoryExist, doesFileExist, listDirectory
-                                  , removeDirectory, createDirectory, removeFile
-                                  , doesPathExist, renamePath
-                                  )
-import System.FilePath.ByteString ((</>), takeDirectory, equalFilePath)
-import System.IO                  (Handle, IOMode(..), openFile, withFile)
-import System.Log.FastLogger      ( TimedFastLogger, LogType'(..), LogStr, ToLogStr(..)
-                                  , newTimedFastLogger
-                                  )
-import System.Log.FastLogger.Date (simpleTimeFormat', newTimeCache)
-import System.PosixCompat.Files   ( FileStatus, getFileStatus, fileSize, fileMode
-                                  , isDirectory, fileOwner, fileGroup, modificationTime
-                                  , ownerReadMode, ownerWriteMode, ownerExecuteMode
-                                  , groupReadMode, groupWriteMode, groupExecuteMode
-                                  , otherReadMode, otherWriteMode, otherExecuteMode
-                                  , linkCount
-                                  )
-import System.Posix.Types         (FileMode)
+import           Control.Concurrent         (forkIO)
+import           Control.Concurrent.MVar    (MVar, modifyMVar, modifyMVar_,
+                                             newEmptyMVar, newMVar, putMVar,
+                                             readMVar, takeMVar, tryTakeMVar)
+import           Control.Monad              (forM_, void)
+import           Control.Monad.Catch        (MonadCatch (..), MonadThrow (..),
+                                             SomeException, catch, tryJust)
+import           Control.Monad.IO.Class     (MonadIO (..))
+import           Control.Monad.Reader       (MonadReader (..), ReaderT (..),
+                                             asks)
+import           Data.Bits                  (shiftR, (.&.))
+import           Data.ByteString            (ByteString)
+import           Data.Fixed                 (Fixed (..))
+import           Data.IntSet                (IntSet)
+import           Data.IORef                 (IORef, newIORef, readIORef,
+                                             writeIORef)
+import           Data.Time                  (defaultTimeLocale, formatTime,
+                                             secondsToNominalDiffTime)
+import           Data.Time.Clock.POSIX      (posixSecondsToUTCTime)
+import           Data.Word                  (Word16, Word8)
+import           GHC.IO.Exception           (IOErrorType (..), IOException (..))
+import           Network.Simple.TCP         (HostPreference (..), Socket,
+                                             bindSock, closeSock, listenSock,
+                                             recv, send, serve)
+import           Network.Socket             (SockAddr (..), accept,
+                                             getSocketName, hostAddressToTuple)
+import           Prelude                    hiding (read)
+import           System.Directory           (createDirectory,
+                                             doesDirectoryExist, doesFileExist,
+                                             doesPathExist, listDirectory,
+                                             removeDirectory, removeFile,
+                                             renamePath)
+import           System.FilePath.ByteString (equalFilePath, takeDirectory,
+                                             (</>))
+import           System.IO                  (Handle, IOMode (..), openFile,
+                                             withFile)
+import           System.Log.FastLogger      (LogStr, LogType' (..),
+                                             TimedFastLogger, ToLogStr (..),
+                                             newTimedFastLogger)
+import           System.Log.FastLogger.Date (newTimeCache, simpleTimeFormat')
+import           System.Posix.Types         (FileMode)
+import           System.PosixCompat.Files   (FileStatus, fileGroup, fileMode,
+                                             fileOwner, fileSize, getFileStatus,
+                                             groupExecuteMode, groupReadMode,
+                                             groupWriteMode, isDirectory,
+                                             linkCount, modificationTime,
+                                             otherExecuteMode, otherReadMode,
+                                             otherWriteMode, ownerExecuteMode,
+                                             ownerReadMode, ownerWriteMode)
 
-import FTP.Commands
+import           FTP.Commands
 
-import qualified Codec.Binary.UTF8.String as UTF8
-import qualified Data.ByteString.Char8 as BS
-import qualified Data.ByteString as BSWord
-import qualified Data.IntSet as IntSet
+import qualified Codec.Binary.UTF8.String   as UTF8
+import qualified Data.ByteString            as BSWord
+import qualified Data.ByteString.Char8      as BS
+import qualified Data.IntSet                as IntSet
 
 data Settings = Settings
-    { settingsUser        :: !(Maybe ByteString)
-    , settingsPassword    :: !(Maybe ByteString)
-    , settingsPort        :: !Int
-    , settingsDirectory   :: !ByteString
+    { settingsUser      :: !(Maybe ByteString)
+    , settingsPassword  :: !(Maybe ByteString)
+    , settingsPort      :: !Int
+    , settingsDirectory :: !ByteString
     }
 
 runServer :: Settings -> IO ()
@@ -84,12 +87,12 @@ runServer settings@Settings{..} = do
         authoredRef <- newIORef False
         isModeSetRef <- newIORef False
         renameFromRef <- newIORef Nothing
-        let ctx = ClientContext 
+        let ctx = ClientContext
                 { clientSettings    = settings
                 , clientCmdConn     = sock
                 , clientFileConn    = fileConnMVar
                 , clientCurDir      = dirRef
-                , clientRelativeDir = relativeDirRef 
+                , clientRelativeDir = relativeDirRef
                 , clientUser        = userRef
                 , clientAuthored    = authoredRef
                 , clientLastPort    = portMVar
@@ -196,7 +199,7 @@ handleCmd Rmd dir = authCmd $ do
         True  -> do
             let handler :: IOException -> Maybe Bool
                 handler e = Just $ ioe_type e == UnsatisfiedConstraints
-                    
+
             liftIO (tryJust handler $ removeDirectory strRmDir) >>= \case
                 Left True  -> sendResponse 550 "Directory not empty."
                 Left False -> sendResponse 550 "Something went wrong."
@@ -407,7 +410,7 @@ closeFileConn = do
     usedPortsMVar <- asks clientUsedPorts
     liftIO $ modifyMVar_ usedPortsMVar (pure . IntSet.delete currentPort)
     fileConnMVar <- asks clientFileConn
-    fileConn <- liftIO $ takeMVar fileConnMVar 
+    fileConn <- liftIO $ takeMVar fileConnMVar
     closeSock fileConn
     isModeSetRef <- asks clientIsModeSet
     liftIO $ writeIORef isModeSetRef False
@@ -452,7 +455,7 @@ getListDirectory arg = BS.unwords $ loop args
         loop []                 = []
 
 concatFilePathM :: ByteString -> ServerM (ByteString, ByteString)
-concatFilePathM path = do 
+concatFilePathM path = do
     curDirRef <- asks clientCurDir
     relativeDirRef <- asks clientRelativeDir
     curDir <- liftIO $ readIORef curDirRef

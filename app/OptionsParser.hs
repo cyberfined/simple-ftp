@@ -1,18 +1,18 @@
 module OptionsParser (parseOptions) where
 
-import Data.ByteString            (ByteString)
-import Options.Applicative        ( Parser, (<**>), execParser, optional, strOption
-                                  , option, auto, value, helper, long, short, info
-                                  , fullDesc
-                                  )
-import System.Environment         (getExecutablePath)
-import System.Exit                (die)
-import System.FilePath.ByteString (takeDirectory)
+import           Data.ByteString            (ByteString)
+import           Options.Applicative        (Parser, auto, execParser, fullDesc,
+                                             helper, info, long, option,
+                                             optional, short, strOption, value,
+                                             (<**>))
+import           System.Environment         (getExecutablePath)
+import           System.Exit                (die)
+import           System.FilePath.ByteString (takeDirectory)
 
-import FTP.Server (Settings(..))
+import           FTP.Server                 (Settings (..))
 
-import qualified Codec.Binary.UTF8.String as UTF8
-import qualified Data.ByteString as BS
+import qualified Codec.Binary.UTF8.String   as UTF8
+import qualified Data.ByteString            as BS
 
 parseOptions :: IO Settings
 parseOptions = do

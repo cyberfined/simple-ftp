@@ -3,8 +3,8 @@ module FTP.Commands
     , parseCmd
     ) where
 
-import Data.ByteString (ByteString)
-import Data.Char       (toUpper)
+import           Data.ByteString       (ByteString)
+import           Data.Char             (toUpper)
 
 import qualified Data.ByteString.Char8 as BS
 
