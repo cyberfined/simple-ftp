@@ -1,7 +1,8 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+
 module FTP.Server
     ( Settings(..)
     , runServer
-    , concatFilePath
     ) where
 
 import Control.Concurrent         (forkIO)
@@ -9,6 +10,9 @@ import Control.Concurrent.MVar    ( MVar, newMVar, newEmptyMVar, modifyMVar, put
                                   , tryTakeMVar, readMVar, takeMVar, modifyMVar_
                                   )
 import Control.Monad              (void, forM_)
+import Control.Monad.Catch        ( MonadCatch(..), MonadThrow(..), SomeException, catch
+                                  , tryJust
+                                  )
 import Control.Monad.IO.Class     (MonadIO(..))
 import Control.Monad.Reader       (ReaderT(..), MonadReader(..), asks)
 import Data.Bits                  ((.&.), shiftR)
@@ -21,6 +25,7 @@ import Data.Time                  ( secondsToNominalDiffTime, formatTime
                                   )
 import Data.Time.Clock.POSIX      (posixSecondsToUTCTime)
 import Data.Word                  (Word8, Word16)
+import GHC.IO.Exception           (IOErrorType(..), IOException(..))
 import Network.Simple.TCP         ( HostPreference(..), Socket, serve, recv, send
                                   , bindSock, listenSock, closeSock
                                   )
@@ -28,9 +33,12 @@ import Network.Socket             ( SockAddr(..), hostAddressToTuple, getSocketN
                                   , accept
                                   )
 import Prelude             hiding (read)
-import System.Directory           (doesDirectoryExist, doesFileExist, listDirectory)
+import System.Directory           ( doesDirectoryExist, doesFileExist, listDirectory
+                                  , removeDirectory, createDirectory, removeFile
+                                  , doesPathExist, renamePath
+                                  )
 import System.FilePath.ByteString ((</>), takeDirectory, equalFilePath)
-import System.IO                  (Handle, IOMode(..), openFile)
+import System.IO                  (Handle, IOMode(..), openFile, withFile)
 import System.Log.FastLogger      ( TimedFastLogger, LogType'(..), LogStr, ToLogStr(..)
                                   , newTimedFastLogger
                                   )
@@ -73,6 +81,7 @@ runServer settings@Settings{..} = do
         userRef <- newIORef Nothing
         authoredRef <- newIORef False
         isModeSetRef <- newIORef False
+        renameFromRef <- newIORef Nothing
         let ctx = ClientContext 
                 { clientSettings    = settings
                 , clientCmdConn     = sock
@@ -87,11 +96,19 @@ runServer settings@Settings{..} = do
                 , clientIsModeSet   = isModeSetRef
                 , clientLogger      = logger
                 , clientCurrentPort = currentPortRef
+                , clientRenameFrom  = renameFromRef
                 }
         runReaderT (runServerM handleConn) ctx
 
 newtype ServerM a = ServerM { runServerM :: ReaderT ClientContext IO a }
-    deriving newtype (Functor, Applicative, Monad, MonadIO, MonadReader ClientContext)
+    deriving newtype ( Functor
+                     , Applicative
+                     , Monad
+                     , MonadIO
+                     , MonadReader ClientContext
+                     , MonadThrow
+                     , MonadCatch
+                     )
 
 data ClientContext = ClientContext
     { clientSettings    :: !Settings
@@ -107,6 +124,7 @@ data ClientContext = ClientContext
     , clientIsModeSet   :: !(IORef Bool)
     , clientLogger      :: !TimedFastLogger
     , clientCurrentPort :: !(IORef Int)
+    , clientRenameFrom  :: !(IORef (Maybe ByteString))
     }
 
 handleConn :: ServerM ()
@@ -125,7 +143,10 @@ handleConn = do
                           loop
                       Right (cmd, arg) -> case cmd of
                           Quit -> pure ()
-                          _    -> handleCmd cmd arg >> loop
+                          _    -> do
+                              catch (handleCmd cmd arg) $ \(_ :: SomeException) ->
+                                  sendResponse 550 "Something went wrong."
+                              loop
 
 writeLog :: LogStr -> ServerM ()
 writeLog msg = do
@@ -164,6 +185,23 @@ handleCmd Pwd _ = authCmd $ do
     relativeDirRef <- asks clientRelativeDir
     relativeDir <- liftIO $ readIORef relativeDirRef
     sendResponse 257 $ "\"" <> relativeDir <> "\" is current directory."
+handleCmd Rmd dir = authCmd $ do
+    (rmDir, _) <- concatFilePathM dir
+    let strRmDir = BS.unpack rmDir
+    liftIO (doesDirectoryExist strRmDir) >>= \case
+        False -> sendResponse 550 "The system cannot find the file specified."
+        True  -> do
+            let handler :: IOException -> Maybe Bool
+                handler e = Just $ ioe_type e == UnsatisfiedConstraints
+                    
+            liftIO (tryJust handler $ removeDirectory strRmDir) >>= \case
+                Left True  -> sendResponse 550 "Directory not empty."
+                Left False -> sendResponse 550 "Something went wrong."
+                Right{}    -> sendResponse 250 "Directory was deleted."
+handleCmd Mkd dir = authCmd $ do
+    (mkDir, _) <- concatFilePathM dir
+    liftIO $ createDirectory (BS.unpack mkDir)
+    sendResponse 250 "Directory was created"
 handleCmd Cwd dir = authCmd $ do
     curDirRef <- asks clientCurDir
     relativeDirRef <- asks clientRelativeDir
@@ -216,21 +254,26 @@ handleCmd Size file = authCmd $ do
            let size = fileSize fStat
            sendResponse 213 (BS.pack $ show size)
        else sendResponse 550 "The system cannot find the file specified."
-handleCmd List _ = fileConnCmd $ do
-    curDirRef <- asks clientCurDir
-    curDir <- liftIO $ readIORef curDirRef
-    files <- liftIO $ listDirectory (BS.unpack curDir)
-    sendResponse 150 "Opening BINARY mode data connection."
-    fileConnMVar <- asks clientFileConn
-    fileConn <- liftIO $ readMVar fileConnMVar
-    forM_ files $ \file -> liftIO $ do
-        let fileName = BS.pack file
-        let filePath = curDir </> fileName
-        fStat <- getFileStatus (BS.unpack filePath)
-        let line = formatFileStat fileName fStat
-        send fileConn (line <> "\n")
-    closeFileConn
-    sendResponse 226 "Transfer complete."
+handleCmd List args = fileConnCmd $ do
+    let dir = getListDirectory args
+    (listDir, _) <- concatFilePathM dir
+    let strListDir = BS.unpack listDir
+    doesExist <- liftIO $ doesDirectoryExist strListDir
+    if not doesExist
+       then sendResponse 550 "The system cannot find the file specified."
+       else do
+           files <- liftIO $ listDirectory strListDir
+           sendResponse 150 "Opening BINARY mode data connection."
+           fileConnMVar <- asks clientFileConn
+           fileConn <- liftIO $ readMVar fileConnMVar
+           forM_ files $ \file -> liftIO $ do
+               let fileName = BS.pack file
+               let filePath = listDir </> fileName
+               fStat <- getFileStatus (BS.unpack filePath)
+               let line = formatFileStat fileName fStat
+               send fileConn (line <> "\n")
+           closeFileConn
+           sendResponse 226 "Transfer complete."
 handleCmd Retr file = fileConnCmd $ getFile file >>= \case
     Nothing             -> sendResponse 550 "The system cannot find the file specified."
     Just (handle, size) -> do
@@ -240,6 +283,43 @@ handleCmd Retr file = fileConnCmd $ getFile file >>= \case
         sendFile handle
         closeFileConn
         sendResponse 226 "Transfer complete."
+handleCmd Stor file = fileConnCmd $ do
+    (newFile, _) <- concatFilePathM file
+    let upDirectory = takeDirectory newFile
+    doesExist <- liftIO $ doesDirectoryExist (BS.unpack upDirectory)
+    if doesExist
+       then do
+           sendResponse 150 "Opening BINARY mode data connection."
+           retrieveFile newFile
+           sendResponse 226 "Transfer complete."
+       else do
+           sendResponse 550 "Directory does not exist."
+handleCmd Dele file = authCmd $ do
+    (rmFile, _) <- concatFilePathM file
+    let strRmFile = BS.unpack rmFile
+    doesExist <- liftIO $ doesFileExist strRmFile
+    if doesExist
+       then do
+           liftIO $ removeFile strRmFile
+           sendResponse 250 "File was deleted."
+       else sendResponse 550 "The system cannot find the file specified."
+handleCmd Rnfr file = authCmd $ do
+    (rnFile, _) <- concatFilePathM file
+    doesExist <- liftIO $ doesPathExist (BS.unpack rnFile)
+    if doesExist
+       then do
+           renameFromRef <- asks clientRenameFrom
+           liftIO $ writeIORef renameFromRef $ Just rnFile
+           sendResponse 350 "Waiting for RNTO command."
+       else sendResponse 550 "The system cannot find the file specified."
+handleCmd Rnto renameTo = authCmd $ do
+    renameFromRef <- asks clientRenameFrom
+    liftIO (readIORef renameFromRef) >>= \case
+        Nothing         -> sendResponse 425 "Use RNFR first."
+        Just renameFrom -> do
+            liftIO $ renamePath (BS.unpack renameFrom) (BS.unpack renameTo)
+            liftIO $ writeIORef renameFromRef Nothing
+            sendResponse 250 "File was renamed."
 handleCmd Quit _ = pure ()
 
 authCmd :: ServerM () -> ServerM ()
@@ -295,14 +375,19 @@ sendFile handle = do
                then pure ()
                else send fileConn chunk >> loop fileConn
 
+retrieveFile :: ByteString -> ServerM ()
+retrieveFile path = do
+    fileConnMVar <- asks clientFileConn
+    fileConn <- liftIO $ readMVar fileConnMVar
+    liftIO $ withFile (BS.unpack path) WriteMode (loop fileConn)
+  where loop fileConn handle = recv fileConn 4096 >>= \case
+            Nothing    -> pure ()
+            Just chunk -> BS.hPut handle chunk >> loop fileConn handle
+
+
 getFile :: ByteString -> ServerM (Maybe (Handle, Int))
 getFile file = do
-    curDirRef <- asks clientCurDir
-    curDir <- liftIO $ readIORef curDirRef
-    rootDir <- asks (settingsDirectory . clientSettings)
-    relativeDirRef <- asks clientRelativeDir
-    relativeDir <- liftIO $ readIORef relativeDirRef
-    let (filePathBs, _) = concatFilePath rootDir curDir relativeDir file
+    (filePathBs, _) <- concatFilePathM file
     let filePath = BS.unpack filePathBs
     doesExist <- liftIO $ doesFileExist filePath
     if doesExist
@@ -352,6 +437,25 @@ formatFileStat fileName stat =
           where r = if mode .&. read /= 0 then "r" else "-"
                 w = if mode .&. write /= 0 then "w" else "-"
                 x = if mode .&. exec /= 0 then "x" else "-"
+
+getListDirectory :: ByteString -> ByteString
+getListDirectory arg = BS.unwords $ loop args
+  where args = BS.words arg
+
+        loop :: [ByteString] -> [ByteString]
+        loop toks@(x:xs)
+          | BS.isPrefixOf "-" x = loop xs
+          | otherwise           = toks
+        loop []                 = []
+
+concatFilePathM :: ByteString -> ServerM (ByteString, ByteString)
+concatFilePathM path = do 
+    curDirRef <- asks clientCurDir
+    relativeDirRef <- asks clientRelativeDir
+    curDir <- liftIO $ readIORef curDirRef
+    relativeDir <- liftIO $ readIORef relativeDirRef
+    rootDir <- asks (settingsDirectory . clientSettings)
+    pure $ concatFilePath rootDir curDir relativeDir path
 
 concatFilePath :: ByteString
                -> ByteString

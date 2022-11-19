@@ -14,11 +14,17 @@ data Command
     | Type
     | Feat
     | Pwd
+    | Rmd
+    | Mkd
     | Cwd
     | Pasv
     | Size
     | List
     | Retr
+    | Stor
+    | Dele
+    | Rnfr
+    | Rnto
     | Quit
     deriving (Eq, Ord, Show)
 
@@ -32,10 +38,16 @@ parseCmd str = (,) <$> cmd <*> pure (BS.strip arg)
             "TYPE" -> Right Type
             "FEAT" -> Right Feat
             "PWD"  -> Right Pwd
+            "RMD"  -> Right Rmd
+            "MKD"  -> Right Mkd
             "CWD"  -> Right Cwd
             "PASV" -> Right Pasv
             "SIZE" -> Right Size
             "LIST" -> Right List
             "RETR" -> Right Retr
+            "STOR" -> Right Stor
+            "DELE" -> Right Dele
+            "RNFR" -> Right Rnfr
+            "RNTO" -> Right Rnto
             "QUIT" -> Right Quit
             _      -> Left $ "Unknown command " <> strCmd
